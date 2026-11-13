@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Spend">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon.svg">
+<title>Spend Tracker</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#14171c; --muted:#6b7280; --line:#e5e7eb; --accent:#0a7d5a; --bad:#c2410c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --card:#181b21; --text:#eef0f3; --muted:#9aa3b2; --line:#272b33; --accent:#34d399; --bad:#fb923c; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 -apple-system,system-ui,"Segoe UI",sans-serif;
+         padding:env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom)); max-width:640px; margin-inline:auto; }
+  h1 { font-size:22px; margin:20px 0 4px; }
+  .sub { color:var(--muted); font-size:14px; margin-bottom:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:14px; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .big { font-size:30px; font-weight:700; letter-spacing:-.5px; }
+  .muted { color:var(--muted); font-size:13px; }
+  input, select, button { font:inherit; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--text); }
+  button { background:var(--accent); color:#04281d; border:0; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:500; }
+  .bar { height:8px; border-radius:4px; background:var(--line); overflow:hidden; margin-top:4px; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+  .tx { padding:10px 0; border-top:1px solid var(--line); }
+  .tx:first-child { border-top:0; }
+  .amt { font-weight:600; font-variant-numeric:tabular-nums; }
+  .amt.in { color:var(--accent); }
+  .del { background:none; color:var(--muted); padding:2px 8px; border:0; font-size:18px; }
+  form { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  form .full { grid-column:1/-1; }
+  .hidden { display:none; }
+  #err { color:var(--bad); font-size:14px; min-height:20px; }
+</style>
+</head>
+<body>
+<h1>Spend Tracker</h1>
+<div class="sub" id="sub">Malaysian ringgit · captured from your iPhone</div>
+
+<div id="login" class="card hidden">
+  <div class="muted" style="margin-bottom:8px">Enter your API key (stored only on this device).</div>
+  <div class="row"><input id="key" type="password" placeholder="API key" style="flex:1" autocomplete="off"><button id="saveKey">Save</button></div>
+</div>
+
+<div id="app" class="hidden">
+  <div class="row" style="margin-bottom:12px">
+    <select id="month"></select>
+    <button class="ghost" id="refresh">Refresh</button>
+  </div>
+
+  <div class="card">
+    <div class="muted">Spent this month</div>
+    <div class="big" id="spent">RM 0.00</div>
+    <div class="muted" id="income"></div>
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px">By category</div>
+    <div id="cats"></div>
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px">Add manually</div>
+    <form id="add">
+      <input name="amount" type="number" step="0.01" min="0" placeholder="Amount (RM)" required>
+      <input name="merchant" placeholder="Merchant / note">
+      <select name="type" class="full"><option value="expense">Expense</option><option value="income">Income</option></select>
+      <button class="full" type="submit">Add</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:4px">Transactions</div>
+    <div id="list"></div>
+  </div>
+  <div class="row"><span id="err"></span><button class="ghost" id="logout">Sign out</button></div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n) => 'RM ' + n.toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let KEY = ''; try { KEY = localStorage.getItem('spendKey') || ''; } catch {}
+let all = [];
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { 'x-api-key': KEY, 'content-type': 'application/json', ...(opts.headers || {}) } });
+  if (r.status === 401) { logout(); throw new Error('Wrong API key'); }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+  return r.json();
+}
+
+function logout() { try { localStorage.removeItem('spendKey'); } catch {} KEY = ''; show(); }
+
+function show() {
+  $('#login').classList.toggle('hidden', !!KEY);
+  $('#app').classList.toggle('hidden', !KEY);
+  if (KEY) load();
+}
+
+async function load() {
+  $('#err').textContent = '';
+  try { all = (await api('/api/transactions')).transactions; render(); }
+  catch (e) { $('#err').textContent = e.message; }
+}
+
+function monthKey(ts) { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
+
+function render() {
+  const months = [...new Set(all.map((t) => monthKey(t.ts)).concat(monthKey(Date.now())))].sort().reverse();
+  const sel = $('#month'); const cur = sel.value || months[0];
+  sel.innerHTML = months.map((m) => `<option value="${m}">${m}</option>`).join('');
+  sel.value = months.includes(cur) ? cur : months[0];
+
+  const rows = all.filter((t) => monthKey(t.ts) === sel.value);
+  const spent = rows.filter((t) => t.type !== 'income').reduce((s, t) => s + t.amount, 0);
+  const inc = rows.filter((t) => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+  $('#spent').textContent = fmt(spent);
+  $('#income').textContent = inc ? 'Income ' + fmt(inc) : '';
+
+  const byCat = {};
+  rows.filter((t) => t.type !== 'income').forEach((t) => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+  const entries = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  $('#cats').innerHTML = entries.length ? entries.map(([c, v]) =>
+    `<div style="margin-bottom:10px"><div class="row"><span>${esc(c)}</span><span class="amt">${fmt(v)}</span></div>
+     <div class="bar"><i style="width:${(v / spent * 100).toFixed(1)}%"></i></div></div>`).join('') : '<div class="muted">No spending yet.</div>';
+
+  $('#list').innerHTML = rows.length ? rows.map((t) => `
+    <div class="tx"><div class="row">
+      <div><div>${esc(t.merchant || 'Unknown')}</div>
+      <div class="muted">${new Date(t.ts).toLocaleString('en-MY', { dateStyle: 'medium', timeStyle: 'short' })} · ${esc(t.category)} · ${esc(t.source)}</div></div>
+      <div class="row"><span class="amt ${t.type === 'income' ? 'in' : ''}">${t.type === 'income' ? '+' : '−'}${fmt(t.amount)}</span>
+      <button class="del" data-id="${t.id}" aria-label="Delete">×</button></div>
+    </div></div>`).join('') : '<div class="muted">Nothing for this month.</div>';
+}
+
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+$('#saveKey').onclick = () => { KEY = $('#key').value.trim(); if (!KEY) return; try { localStorage.setItem('spendKey', KEY); } catch {} show(); };
+$('#logout').onclick = logout;
+$('#refresh').onclick = load;
+$('#month').onchange = render;
+$('#list').onclick = async (e) => {
+  const id = e.target.dataset && e.target.dataset.id; if (!id) return;
+  if (!confirm('Delete this transaction?')) return;
+  try { await api('/api/transactions?id=' + id, { method: 'DELETE' }); load(); } catch (er) { $('#err').textContent = er.message; }
+};
+$('#add').onsubmit = async (e) => {
+  e.preventDefault();
+  const f = Object.fromEntries(new FormData(e.target));
+  try { await api('/api/transactions', { method: 'POST', body: JSON.stringify(f) }); e.target.reset(); load(); }
+  catch (er) { $('#err').textContent = er.message; }
+};
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+document.addEventListener('visibilitychange', () => { if (!document.hidden && KEY) load(); });
+show();
+</script>
+</body>
+</html>
